@@ -15,7 +15,7 @@ void input(int clientSocket) {
     int bytesReceived;
     while ((bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0)) > 0) {
         buffer[bytesReceived] = '\0'; // Garante terminação
-        cout << "Message from client " << clientSocket << ": " << buffer << endl;
+        cout << "Message from servidor " << clientSocket << ": " << buffer << endl;
         memset(buffer, 0, sizeof(buffer)); // Limpa o buffer
     }
 }

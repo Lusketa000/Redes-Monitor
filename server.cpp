@@ -20,17 +20,19 @@ void input(int clientSocket) {
         cout << "Message from client " << clientSocket << ": " << buffer << endl;
         memset(buffer, 0, sizeof(buffer)); // Limpa o buffer
     }
+    // TODO: Verificar o comando e criar uma thread output de acordo
 }
 
-void output(int clientSocket) {
+void output(int clientSocket, int tempo) {
     while(1) {
+        // TODO: Vê na flag global se tem que parar
+
         // sending data
         const char* message = "Hello, client!";
         send(clientSocket, message, strlen(message), 0);
 
-        this_thread::sleep_for(chrono::seconds(5));
+        this_thread::sleep_for(chrono::seconds(tempo));
     }
-
 }
 
 int main()
@@ -51,8 +53,7 @@ int main()
     // listening to the assigned socket
     listen(serverSocket, 5);
 
-    vector<tuple<thread, thread>> threads;
-    //vector<int> clientSockets;
+    vector<thread> threads;
 
     while (1) {
         // accepting connection request
@@ -66,8 +67,7 @@ int main()
         send(clientSocket, message, strlen(message), 0);
 
         threads.emplace_back(
-            thread(input, clientSocket), 
-            thread(output, clientSocket)
+            thread(input, clientSocket)
         );
     }
         

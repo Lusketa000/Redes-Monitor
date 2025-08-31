@@ -10,13 +10,13 @@
 using namespace std;
 
 void input(int clientSocket) {
-    cout << "funcao input" << endl;
     char buffer[1024];
     int bytesReceived;
     while ((bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0)) > 0) {
         buffer[bytesReceived] = '\0'; // Garante terminação
-        cout << "Message from servidor " << clientSocket << ": " << buffer << endl;
-        memset(buffer, 0, sizeof(buffer)); // Limpa o buffer
+        cout << "\r                                        \r";
+        cout << buffer;
+        fflush(stdout);
     }
 }
 
@@ -36,20 +36,37 @@ int main()
             sizeof(serverAddress));
 
     // recieving data
-    char buffer[1024] = { 0 };
+    char buffer[2048] = { 0 };
     recv(clientSocket, buffer, sizeof(buffer), 0);
-    cout << "Message from servidor: " << buffer << endl;
+    cout << buffer;
 
     thread thread(input, clientSocket);
 
-    while(1) {
+    while(true) {
+        cout << "> ";
+        fflush(stdout);
+
         string message;
         getline(cin, message);
-        send(clientSocket, message.c_str(), message.size(), 0);
+
+        if(!message.empty()) {
+            send(clientSocket, message.c_str(), message.size(), 0);
+        }
+
+        string temp_msg = message;
+        for(auto &c : temp_msg) c = toupper(c);
+        if(temp_msg == "EXIT") {
+            break;
+        }
         
     }
 
+    cout << "Encerrando a conexão!!" << endl;
+
+    shutdown(clientSocket, SHUT_WR);
+
     // closing socket
+    thread.join();
     close(clientSocket);
 
     return 0;

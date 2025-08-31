@@ -10,14 +10,56 @@
 #include <sys/socket.h>
 #include <sstream>
 #include <cstring>
+#include <ctime>
+#include <iomanip>
+#include <mutex>
+#include <condition_variable>
+#include <cstdio>
+#include <algorithm>
 
 using namespace std;
 
-atomic<bool> keepRunningClient(false);
+struct monitorControl {
+    std::mutex mtx;      
+    std::condition_variable cv;   
+    std::atomic<bool> keepRunning{false};
+};
 
 string getCPUUsage(pid_t pid) {
-    // TODO: implementar a leitura real de CPU do processo
-    return "CPU usada: 50.00 %\n";
+
+    //comando "top -b -n 1 | grep '^%Cpu(s)" para pegar porcentagem de uso de CPU
+    //vai retornar: %Cpu(s):  1.5 us,  0.8 sy,  0.0 ni, 97.5 id, ...
+    //usamos o "id", que mostra o a porcentagem em "idle" da CPU
+    const char* command = "top -b -n 1 | grep '^%Cpu(s)'";
+    char buffer[256];
+    string result = "CPU usada: 0.00 %\n";
+
+    FILE* file = popen(command, "r");
+
+    if(fgets(buffer,sizeof(buffer), file) != nullptr) {
+        string line = buffer;
+        size_t position = line.find("id,");
+
+        //logica para achar o "id" no meio do output do comando
+        if(position != string::npos) {
+            size_t start_position = line.rfind(',', position);
+
+            if(start_position != string::npos) {
+                string idle_usage = line.substr(start_position + 1, position - (start_position + 1));
+                std::replace(idle_usage.begin(), idle_usage.end(), ',', '.');
+
+                //calculo para a porcentagem de uso da CPU
+                double idle_percentage = stod(idle_usage);
+                double cpu_percentage = 100.0 - idle_percentage;
+
+                stringstream ss;
+                ss << fixed << setprecision(2) << "CPU Usada: " << cpu_percentage << " %\n";
+                result = ss.str();
+            }
+        }
+    }
+    pclose(file);
+    return result;
 }
 
 string getMemoryUsage(pid_t pid) {
@@ -35,65 +77,131 @@ string getMemoryUsage(pid_t pid) {
     return "Memória usada: " + to_string(mem_kb) + " kB\n";
 }
 
-void output(int clientSocket, pid_t pid, int tempo, int tipo, atomic<bool>& keepRunning) {
-    while (keepRunning) {
+void output(int clientSocket, pid_t pid, int tempo, int tipo, monitorControl& control) {
+    while (control.keepRunning) {
         string result = (tipo == 1) ? getMemoryUsage(pid) : getCPUUsage(pid);
         send(clientSocket, result.c_str(), result.size(), 0);
-        this_thread::sleep_for(chrono::seconds(tempo));
+
+        std::unique_lock<std::mutex> lock(control.mtx);
+
+        if (control.cv.wait_for(lock, std::chrono::seconds(tempo), [&](){ 
+            return !control.keepRunning;
+        })) 
+        {
+            break;
+        }
     }
 }
 
 void input(int clientSocket, pid_t pid) {
+    monitorControl memControl;
+    monitorControl cpuControl;
+
+    thread threadMem;
+    thread threadCpu;
+
     char buffer[1024];
     int bytesReceived;
 
-    thread A;
-    thread B;
 
     while ((bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0)) > 0) {
         buffer[bytesReceived] = '\0';
 
-        cout << "Comando do cliente " << clientSocket << ": " << buffer;
+        cout << "Comando do cliente " << clientSocket << ": " << buffer << "\n";
 
-        string cmd;
-        int Tempo = 1;
+        string cmd, param;
+        int tempo = 1;
         istringstream iss(buffer);
-        iss >> cmd >> Tempo;
+        iss >> cmd >> param;
 
-        if (cmd == "MEM" || cmd == "MEM\n") {
-            if (!keepRunningClient) {
-                keepRunningClient = true;
-                if (A.joinable()) A.join();
-                A = thread(output, clientSocket, pid, Tempo, 1, ref(keepRunningClient));
-            }
-        } else if (cmd == "CPU" || cmd == "CPU\n") {
-            if (!keepRunningClient) {
-                keepRunningClient = true;
-                if (B.joinable()) B.join();
-                B = thread(output, clientSocket, pid, Tempo, 0, ref(keepRunningClient));
-            }
-        } else if (cmd == "EXIT" || cmd == "EXIT\n") {
-            keepRunningClient = false;
+        for (auto & c: cmd) c = toupper(c);
 
+        if (cmd == "MEMORIA" || cmd == "MEM") {
+            tempo = (param.empty()) ? 1 : stoi(param);
+            if (memControl.keepRunning) {
+                send(clientSocket, "ERRO: Monitor de memoria ja ativo.\n", 36, 0);
+
+            } else {
+                memControl.keepRunning = true;
+                if (threadMem.joinable()) threadMem.join();
+                threadMem = thread(output, clientSocket, pid, tempo, 1, ref(memControl));
+            }
+
+        } else if (cmd == "CPU") {
+            tempo = (param.empty()) ? 1 : stoi(param);
+            if (cpuControl.keepRunning) {
+                send(clientSocket, "ERRO: Monitor de CPU ja ativo.\n", 31, 0);
+
+            } else {
+                cpuControl.keepRunning = true;
+                if (threadCpu.joinable()) threadCpu.join();
+                threadCpu = thread(output, clientSocket, pid, tempo, 0, ref(cpuControl));
+            }
+
+        } else if (cmd == "QUIT") {
+            for (auto & c: param) c = toupper(c);
+            if (param == "MEM") {
+                if(memControl.keepRunning) {
+                    memControl.keepRunning = false;
+                    memControl.cv.notify_one();
+                    if (threadMem.joinable()) threadMem.join();
+                    send(clientSocket, "Monitor de memoria interrompido.\n", 33, 0);
+                }
+
+            } else if (param == "CPU") {
+                if(cpuControl.keepRunning) {
+                    cpuControl.keepRunning = false;
+                    cpuControl.cv.notify_one();
+                    if (threadCpu.joinable()) threadCpu.join();
+                    send(clientSocket, "Monitor de CPU interrompido.\n", 29, 0);
+                }
+            
+            } else if (param == "ALL") {
+                memControl.keepRunning = false;
+                cpuControl.keepRunning = false;
+
+                memControl.cv.notify_one();
+                cpuControl.cv.notify_one();
+
+                if (threadMem.joinable()) threadMem.join();
+                if (threadCpu.joinable()) threadCpu.join();
+
+                std::string msg = "Todos os monitores foram interrompidos.\n";
+                send(clientSocket, msg.c_str(), msg.size(), 0);
+
+                std::stringstream ss;
+                ss << "--- MENU ---\n";
+                ss << "Uso de CPU (%): CPU <intervalo em segundos>\n";
+                ss << "Uso de Memória (kB): MEM <intervalo em segundos>\n";
+                ss << "Terminar Monitores: Quit <CPU | MEM | ALL>\n";
+                ss << "Sair: Exit\n";
+                ss << "------------\n";
+                std::string menuMsg = ss.str();
+                send(clientSocket, menuMsg.c_str(), menuMsg.size(), 0);
+
+            } else {
+                send(clientSocket, "Use: Quit MEM ou Quit CPU\n", 27, 0);
+            }
+
+        } else if (cmd == "EXIT") {
+            cout << "Cliente " << clientSocket << " pediu para desconectar.\n";
+            send(clientSocket, "Desconectando...\n", 18, 0);
+            break;
         } else {
-            string msg = "Comando desconhecido\n";
-            send(clientSocket, msg.c_str(), msg.size(), 0);
+            send(clientSocket, "Comando desconhecido.\n", 22, 0);
         }
-
         memset(buffer, 0, sizeof(buffer));
     }
 
     cout << "Cliente " << clientSocket << " desconectou.\n";
-    keepRunningClient = false;
 
-    if (A.joinable()) {
-        A.join();
-    }
+    memControl.keepRunning = false;
+    cpuControl.keepRunning = false;
+    memControl.cv.notify_one();
+    cpuControl.cv.notify_one();
 
-        if (B.joinable()) {
-        B.join();
-    }
-
+    if (threadMem.joinable()) threadMem.join();
+    if (threadCpu.joinable()) threadCpu.join();
 
     close(clientSocket);
 }
@@ -121,10 +229,23 @@ int main() {
             continue;
         }
 
-        cout << "Cliente conectado! Socket: " << clientSocket << endl;
+        auto now = std::chrono::system_clock::now();
+        auto in_time_t = std::chrono::system_clock::to_time_t(now);
 
-        const char* welcomeMsg = "Bem-vindo ao servidor!\n";
-        send(clientSocket, welcomeMsg, strlen(welcomeMsg), 0);
+        std::stringstream ss;
+        ss << "<" << std::put_time(std::localtime(&in_time_t), "%H:%M:%S") << ">: CONECTADO!!\n";
+        ss << "--- MENU ---\n";
+        ss << "Uso de CPU (%): CPU <intervalo em segundos>\n";
+        ss << "Uso de Memória (kB): MEM <intervalo em segundos>\n";
+        ss << "Terminar Monitores: Quit <CPU | MEM | ALL>\n";
+        ss << "Sair: Exit\n";
+        ss << "------------\n";
+
+        std::string welcomeMsg = ss.str();
+
+        send(clientSocket, welcomeMsg.c_str(), welcomeMsg.size(), 0);
+
+        cout << "Cliente " << clientSocket << " conectado!! " << endl;
 
         threads.emplace_back(thread(input, clientSocket, pid));
     }

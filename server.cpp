@@ -25,12 +25,24 @@ struct monitorControl {
     std::atomic<bool> keepRunning{false};
 };
 
-string getCPUUsage(pid_t pid) {
+void sendMenu(int clientSocket) {
+    std::stringstream ss;
+    ss << "------------------- MENU ------------------\n";
+    ss << "Uso de CPU (%): CPU <intervalo>\n";
+    ss << "Uso de Memória (kB): MEM <intervalo>\n";
+    ss << "Terminar Monitores: Quit <CPU | MEM | ALL>\n";
+    ss << "Sair: Exit\n";
+    ss << "--------------------------------------------\n";
+    std::string menuMsg = ss.str();
+    send(clientSocket, menuMsg.c_str(), menuMsg.size(), 0);
+}
 
-    //comando "top -b -n 1 | grep '^%Cpu(s)" para pegar porcentagem de uso de CPU
+string getCPUUsage() {
+
+    //comando "top -b -n 1 | grep '^%Cpu(s)'" para pegar porcentagem de uso de CPU
     //vai retornar: %Cpu(s):  1.5 us,  0.8 sy,  0.0 ni, 97.5 id, ...
     //usamos o "id", que mostra o a porcentagem em "idle" da CPU
-    const char* command = "top -b -n 1 | grep '^%Cpu(s)'";
+    const char* command = "top -b -n 1 | grep Cpu";
     char buffer[256];
     string result = "CPU usada: 0.00 %\n";
 
@@ -79,7 +91,7 @@ string getMemoryUsage(pid_t pid) {
 
 void output(int clientSocket, pid_t pid, int tempo, int tipo, monitorControl& control) {
     while (control.keepRunning) {
-        string result = (tipo == 1) ? getMemoryUsage(pid) : getCPUUsage(pid);
+        string result = (tipo == 1) ? getMemoryUsage(pid) : getCPUUsage();
         send(clientSocket, result.c_str(), result.size(), 0);
 
         std::unique_lock<std::mutex> lock(control.mtx);
@@ -119,11 +131,10 @@ void input(int clientSocket, pid_t pid) {
         if (cmd == "MEMORIA" || cmd == "MEM") {
             tempo = (param.empty()) ? 1 : stoi(param);
             if (memControl.keepRunning) {
-                send(clientSocket, "ERRO: Monitor de memoria ja ativo.\n", 36, 0);
+                send(clientSocket, "ERRO: Monitor de memória já ativo.\n", 36, 0);
 
             } else {
                 memControl.keepRunning = true;
-                if (threadMem.joinable()) threadMem.join();
                 threadMem = thread(output, clientSocket, pid, tempo, 1, ref(memControl));
             }
 
@@ -134,7 +145,9 @@ void input(int clientSocket, pid_t pid) {
 
             } else {
                 cpuControl.keepRunning = true;
-                if (threadCpu.joinable()) threadCpu.join();
+                if (threadCpu.joinable()) {
+                    threadCpu.join();
+                }
                 threadCpu = thread(output, clientSocket, pid, tempo, 0, ref(cpuControl));
             }
 
@@ -144,16 +157,28 @@ void input(int clientSocket, pid_t pid) {
                 if(memControl.keepRunning) {
                     memControl.keepRunning = false;
                     memControl.cv.notify_one();
-                    if (threadMem.joinable()) threadMem.join();
+                    if (threadMem.joinable()) {
+                        threadMem.join();
+                    }
                     send(clientSocket, "Monitor de memoria interrompido.\n", 33, 0);
+
+                    if(!cpuControl.keepRunning) {
+                        sendMenu(clientSocket);
+                    }
                 }
 
             } else if (param == "CPU") {
                 if(cpuControl.keepRunning) {
                     cpuControl.keepRunning = false;
                     cpuControl.cv.notify_one();
-                    if (threadCpu.joinable()) threadCpu.join();
+                    if (threadCpu.joinable()) {
+                        threadCpu.join();
+                    }
                     send(clientSocket, "Monitor de CPU interrompido.\n", 29, 0);
+
+                    if(!memControl.keepRunning) {
+                        sendMenu(clientSocket);
+                    }
                 }
             
             } else if (param == "ALL") {
@@ -163,21 +188,17 @@ void input(int clientSocket, pid_t pid) {
                 memControl.cv.notify_one();
                 cpuControl.cv.notify_one();
 
-                if (threadMem.joinable()) threadMem.join();
-                if (threadCpu.joinable()) threadCpu.join();
+                if (threadMem.joinable()) {
+                    threadMem.join();
+                }
+                if (threadCpu.joinable()) {
+                    threadCpu.join();
+                }
 
                 std::string msg = "Todos os monitores foram interrompidos.\n";
                 send(clientSocket, msg.c_str(), msg.size(), 0);
 
-                std::stringstream ss;
-                ss << "--- MENU ---\n";
-                ss << "Uso de CPU (%): CPU <intervalo em segundos>\n";
-                ss << "Uso de Memória (kB): MEM <intervalo em segundos>\n";
-                ss << "Terminar Monitores: Quit <CPU | MEM | ALL>\n";
-                ss << "Sair: Exit\n";
-                ss << "------------\n";
-                std::string menuMsg = ss.str();
-                send(clientSocket, menuMsg.c_str(), menuMsg.size(), 0);
+                sendMenu(clientSocket);
 
             } else {
                 send(clientSocket, "Use: Quit MEM ou Quit CPU\n", 27, 0);
@@ -217,7 +238,7 @@ int main() {
     bind(serverSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress));
     listen(serverSocket, 5);
 
-    vector<thread> threads;
+    //vector<thread> threads;
     pid_t pid = getpid();
 
     cout << "Servidor aguardando conexão...\n";
@@ -232,22 +253,16 @@ int main() {
         auto now = std::chrono::system_clock::now();
         auto in_time_t = std::chrono::system_clock::to_time_t(now);
 
-        std::stringstream ss;
+        stringstream ss;
         ss << "<" << std::put_time(std::localtime(&in_time_t), "%H:%M:%S") << ">: CONECTADO!!\n";
-        ss << "--- MENU ---\n";
-        ss << "Uso de CPU (%): CPU <intervalo em segundos>\n";
-        ss << "Uso de Memória (kB): MEM <intervalo em segundos>\n";
-        ss << "Terminar Monitores: Quit <CPU | MEM | ALL>\n";
-        ss << "Sair: Exit\n";
-        ss << "------------\n";
+        string connectedMsg = ss.str();
+        send(clientSocket, connectedMsg.c_str(), connectedMsg.size(), 0);
 
-        std::string welcomeMsg = ss.str();
-
-        send(clientSocket, welcomeMsg.c_str(), welcomeMsg.size(), 0);
+        sendMenu(clientSocket);
 
         cout << "Cliente " << clientSocket << " conectado!! " << endl;
 
-        threads.emplace_back(thread(input, clientSocket, pid));
+        thread(thread(input, clientSocket, pid)).detach();
     }
 
     close(serverSocket);

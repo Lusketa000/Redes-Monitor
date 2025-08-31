@@ -32,13 +32,23 @@ int main()
     serverAddress.sin_addr.s_addr = INADDR_ANY;
 
     // sending connection request
-    connect(clientSocket, (struct sockaddr*)&serverAddress,
-            sizeof(serverAddress));
-
+    while(true){
+        int success = connect(clientSocket, (struct sockaddr*)&serverAddress,sizeof(serverAddress));
+        if(success == 0) {
+            cout << "Conectado ao servidor.\n";
+            break;
+        } else {
+            cerr << "Falha na conexão. Tentando novamente...\n";
+            this_thread::sleep_for(chrono::seconds(5));
+        }
+    }
+    
     // recieving data
     char buffer[2048] = { 0 };
     recv(clientSocket, buffer, sizeof(buffer), 0);
     cout << buffer;
+
+    
 
     thread thread(input, clientSocket);
 

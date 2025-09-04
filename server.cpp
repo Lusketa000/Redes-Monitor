@@ -238,33 +238,63 @@ int main() {
     bind(serverSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress));
     listen(serverSocket, 5);
 
-    //vector<thread> threads;
     pid_t pid = getpid();
 
     cout << "Servidor aguardando conexão...\n";
 
-    while (true) {
-        int clientSocket = accept(serverSocket, nullptr, nullptr);
-        if (clientSocket < 0) {
-            cerr << "Erro ao aceitar conexão.\n";
-            continue;
+    std::atomic<bool> running{true};
+
+    // Thread para ler input do terminal do servidor
+    std::thread serverInput([&running]() {
+        std::string cmd;
+        while (running) {
+            std::getline(std::cin, cmd);
+            if (cmd == "exit") {
+                running = false;
+                std::cout << "Encerrando servidor...\n";
+                break;
+            }
         }
+    });
 
-        auto now = std::chrono::system_clock::now();
-        auto in_time_t = std::chrono::system_clock::to_time_t(now);
+    while (running) {
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(serverSocket, &readfds);
 
-        stringstream ss;
-        ss << "<" << std::put_time(std::localtime(&in_time_t), "%H:%M:%S") << ">: CONECTADO!!\n";
-        string connectedMsg = ss.str();
-        send(clientSocket, connectedMsg.c_str(), connectedMsg.size(), 0);
+        struct timeval timeout;
+        timeout.tv_sec = 1; // 1 segundo
+        timeout.tv_usec = 0; // 0 microsegundos
 
-        sendMenu(clientSocket);
+        int activity = select(serverSocket + 1, &readfds, nullptr, nullptr, &timeout);
 
-        cout << "Cliente " << clientSocket << " conectado!! " << endl;
+        if (!running) break;
 
-        thread(thread(input, clientSocket, pid)).detach();
+        if (activity > 0 && FD_ISSET(serverSocket, &readfds)) {
+            int clientSocket = accept(serverSocket, nullptr, nullptr);
+            if (clientSocket < 0) {
+                cerr << "Erro ao aceitar conexão.\n";
+                continue;
+            }
+
+            auto now = std::chrono::system_clock::now();
+            auto in_time_t = std::chrono::system_clock::to_time_t(now);
+
+            stringstream ss;
+            ss << "<" << std::put_time(std::localtime(&in_time_t), "%H:%M:%S") << ">: CONECTADO!!\n";
+            string connectedMsg = ss.str();
+            send(clientSocket, connectedMsg.c_str(), connectedMsg.size(), 0);
+
+            sendMenu(clientSocket);
+
+            cout << "Cliente " << clientSocket << " conectado!! " << endl;
+
+            thread(thread(input, clientSocket, pid)).detach();
+        }
+        // Se não teve atividade, apenas continua o loop para checar running
     }
 
     close(serverSocket);
+    if (serverInput.joinable()) serverInput.join();
     return 0;
 }

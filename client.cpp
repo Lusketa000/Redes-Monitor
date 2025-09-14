@@ -1,5 +1,5 @@
-    // C++ program to illustrate the client application in the
-    // socket programming
+    // Programa em C++ para ilustrar a aplicação cliente na
+    // programação de socket
     #include <cstring>
     #include <iostream>
     #include <netinet/in.h>

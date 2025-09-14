@@ -105,7 +105,11 @@ void output(int clientSocket, pid_t pid, int tempo, int tipo, monitorControl& co
     }
 }
 
-void input(int clientSocket, pid_t pid) {
+void input(int clientSocket, pid_t pid, atomic<int>& client_count) {
+    //Aumenta contador de clientes conectados
+    client_count++;
+    cout << "Quantidade de clientes conectados: " << client_count << endl;
+
     monitorControl memControl;
     monitorControl cpuControl;
 
@@ -225,9 +229,27 @@ void input(int clientSocket, pid_t pid) {
     if (threadCpu.joinable()) threadCpu.join();
 
     close(clientSocket);
+
+    //Diminui contador de clientes conectados
+    client_count--;
+    cout << "Quantidade de clientes conectados: " << client_count << endl;
 }
 
-int main() {
+int main(int argc, char *argv[]) {
+    //Se não receber o limite de clientes, da erro e encerra o programa
+    if(argc < 2) {
+        cerr << "É necessário informar o limite de clientes.\n";
+        return 1;
+    }
+    int client_limit = stoi(argv[1]);
+    cout << "Limite de clientes: " << client_limit << " clientes.\n";
+
+    //Contador de clientes conectados
+    atomic<int> client_count{0};
+
+    //Cria lista de threads e socket dos clientes
+    vector<pair<thread, int>> clientThreads;
+
     int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
 
     sockaddr_in serverAddress{};
@@ -277,6 +299,15 @@ int main() {
                 continue;
             }
 
+            //Verificador de limite de clientes
+            if(client_count >= client_limit) {
+                cout << "Limite de cliente atingido (" << client_count << "/" << client_limit << ").\n";
+                const char* msg = "Servidor cheio. Tente novamente mais tarde.\n";
+                send(clientSocket, msg, strlen(msg), 0);
+                close(clientSocket);
+                continue;
+            }
+
             auto now = std::chrono::system_clock::now();
             auto in_time_t = std::chrono::system_clock::to_time_t(now);
 
@@ -289,12 +320,28 @@ int main() {
 
             cout << "Cliente " << clientSocket << " conectado!! " << endl;
 
-            thread(thread(input, clientSocket, pid)).detach();
+            //Guarda thread e socket do cliente na lista
+            clientThreads.emplace_back(thread(input, clientSocket, pid, ref(client_count)), clientSocket);
         }
         // Se não teve atividade, apenas continua o loop para checar running
     }
 
+    cout << "Encerrando conexão com " << client_count << " clientes...\n";
+
+    //Fecha todos os sockets
+    for(auto const& [thr, sock] : clientThreads) {
+        close(sock);
+    }
+
+    //Da join em todas as threads
+    for(auto& [thr, sock] : clientThreads) {
+        if(thr.joinable()) {
+            thr.join();
+        }
+    }
+
     close(serverSocket);
     if (serverInput.joinable()) serverInput.join();
+
     return 0;
 }

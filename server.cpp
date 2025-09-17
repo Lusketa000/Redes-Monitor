@@ -330,6 +330,7 @@ int main(int argc, char *argv[]) {
 
     //Fecha todos os sockets
     for(auto const& [thr, sock] : clientThreads) {
+        shutdown(sock, SHUT_RDWR);
         close(sock);
     }
 

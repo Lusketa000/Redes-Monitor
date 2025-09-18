@@ -39,9 +39,9 @@ void sendMenu(int clientSocket) {
 
 string getCPUUsage() {
 
-    //comando "top -b -n 1 | grep '^%Cpu(s)'" para pegar porcentagem de uso de CPU
-    //vai retornar: %Cpu(s):  1.5 us,  0.8 sy,  0.0 ni, 97.5 id, ...
-    //usamos o "id", que mostra o a porcentagem em "idle" da CPU
+    //Comando "top -b -n 1 | grep '^%Cpu(s)'" para pegar porcentagem de uso de CPU
+    //Vai retornar: %Cpu(s):  1.5 us,  0.8 sy,  0.0 ni, 97.5 id, ...
+    //Usamos o "id", que mostra o a porcentagem em "idle" da CPU
     const char* command = "top -b -n 1 | grep Cpu";
     char buffer[256];
     string result = "CPU usada: 0.00 %\n";
@@ -52,15 +52,17 @@ string getCPUUsage() {
         string line = buffer;
         size_t position = line.find("id,");
 
-        //logica para achar o "id" no meio do output do comando
+        //lógica para achar o "id" no meio do output do comando
         if(position != string::npos) {
             size_t start_position = line.rfind(',', position);
 
             if(start_position != string::npos) {
                 string idle_usage = line.substr(start_position + 1, position - (start_position + 1));
-                std::replace(idle_usage.begin(), idle_usage.end(), ',', '.');
+                
+                //Evita que o separador decimal seja uma vírgula, para que o stod funcione corretamente
+                replace(idle_usage.begin(), idle_usage.end(), ',', '.');
 
-                //calculo para a porcentagem de uso da CPU
+                //Cálculo para a porcentagem de uso da CPU
                 double idle_percentage = stod(idle_usage);
                 double cpu_percentage = 100.0 - idle_percentage;
 
@@ -74,24 +76,42 @@ string getCPUUsage() {
     return result;
 }
 
-string getMemoryUsage(pid_t pid) {
-    ifstream statusFile("/proc/" + to_string(pid) + "/status");
-    if (!statusFile) return "Processo não encontrado\n";
+string getMemoryUsage() {
+    //Comando "free | grep Mem" para pegar uso de memória
+    //Vai retornar: Mem: 16281140     5725836     1332820      ...
+    //Sendo:        Mem:  TOTAL        USADO       LIVRE       ...
 
-    string line;
-    long mem_kb = 0;
-    while (getline(statusFile, line)) {
-        if (line.rfind("VmRSS:", 0) == 0) {
-            mem_kb = stol(line.substr(6));
-            break;
+    const char* command = "free | grep Mem";
+    char buffer[256];
+    string result = "Memória usada: 0 kB\n";
+
+    FILE* file = popen(command, "r");
+    if(file) {
+        //Armazena o retorno do comando na variável buffer
+        if (fgets(buffer, sizeof(buffer), file) != nullptr) {
+            
+            //Gera um stringstream para extrair os valores gerados pelo comando (EM ORDEM)
+            stringstream ss(buffer);
+            string label;
+            long total_kb, used_kb;
+
+            ss >> label;                //O rótulo "Mem:" é armazenado e descartado em 'label'
+
+            ss >> total_kb >> used_kb;  //Memória total e memória usada são armazenadas nas variáveis total_kb e used_kb
+
+            stringstream result_ss;
+            result_ss << "Memória usada: " << (used_kb/1024) << " MB\n";
+            result = result_ss.str();
         }
+        pclose(file);
     }
-    return "Memória usada: " + to_string(mem_kb) + " kB\n";
+    return result;
 }
+
 
 void output(int clientSocket, pid_t pid, int tempo, int tipo, monitorControl& control) {
     while (control.keepRunning) {
-        string result = (tipo == 1) ? getMemoryUsage(pid) : getCPUUsage();
+        string result = (tipo == 1) ? getMemoryUsage() : getCPUUsage();
         send(clientSocket, result.c_str(), result.size(), 0);
 
         std::unique_lock<std::mutex> lock(control.mtx);
@@ -133,7 +153,19 @@ void input(int clientSocket, pid_t pid, atomic<int>& client_count) {
         for (auto & c: cmd) c = toupper(c);
 
         if (cmd == "MEMORIA" || cmd == "MEM") {
-            tempo = (param.empty()) ? 1 : stoi(param);
+            try {
+                tempo = (param.empty()) ? 1 : stoi(param);
+                if (tempo <= 0) {
+                    string msg = "Intervalo deve ser maior que zero.\n";
+                    send(clientSocket, msg.c_str(), msg.size(), 0);
+                    continue;
+                }
+            } catch (const exception& e) {
+                string msg = "Intervalo inválido.\n";
+                send(clientSocket, msg.c_str(), msg.size(), 0);
+                continue;
+            }
+
             if (memControl.keepRunning) {
                 send(clientSocket, "ERRO: Monitor de memória já ativo.\n", 36, 0);
 
@@ -143,7 +175,19 @@ void input(int clientSocket, pid_t pid, atomic<int>& client_count) {
             }
 
         } else if (cmd == "CPU") {
-            tempo = (param.empty()) ? 1 : stoi(param);
+            try {
+                tempo = (param.empty()) ? 1 : stoi(param);
+                if (tempo <= 0) {
+                    string msg = "Intervalo deve ser maior que zero.\n";
+                    send(clientSocket, msg.c_str(), msg.size(), 0);
+                    continue;
+                }
+            } catch (const exception& e) {
+                string msg = "Intervalo inválido.\n";
+                send(clientSocket, msg.c_str(), msg.size(), 0);
+                continue;
+            }
+
             if (cpuControl.keepRunning) {
                 send(clientSocket, "ERRO: Monitor de CPU ja ativo.\n", 31, 0);
 
@@ -241,7 +285,19 @@ int main(int argc, char *argv[]) {
         cerr << "É necessário informar o limite de clientes.\n";
         return 1;
     }
-    int client_limit = stoi(argv[1]);
+    int client_limit = 0;
+
+    //Bloco try catch para verificar se o argumento é um valor válido 
+    try {
+        client_limit = stoi(argv[1]);
+        if(client_limit <= 0) {
+            cerr << "Limite de clientes deve ser um número maior que zero.\n";
+            return 1;
+        }
+    } catch (const exception& e) {
+        cerr << "Limite de clientes inválido.\n";
+        return 1;
+    }
     cout << "Limite de clientes: " << client_limit << " clientes.\n";
 
     //Contador de clientes conectados

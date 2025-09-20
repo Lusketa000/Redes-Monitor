@@ -20,20 +20,20 @@
 using namespace std;
 
 struct monitorControl {
-    std::mutex mtx;      
-    std::condition_variable cv;   
-    std::atomic<bool> keepRunning{false};
+    mutex mtx;      
+    condition_variable cv;   
+    atomic<bool> keepRunning{false};
 };
 
 void sendMenu(int clientSocket) {
-    std::stringstream ss;
+    stringstream ss;
     ss << "------------------- MENU ------------------\n";
     ss << "Uso de CPU (%): CPU <intervalo>\n";
     ss << "Uso de Memória (kB): MEM <intervalo>\n";
     ss << "Terminar Monitores: Quit <CPU | MEM | ALL>\n";
     ss << "Sair: Exit\n";
     ss << "--------------------------------------------\n";
-    std::string menuMsg = ss.str();
+    string menuMsg = ss.str();
     send(clientSocket, menuMsg.c_str(), menuMsg.size(), 0);
 }
 
@@ -47,32 +47,35 @@ string getCPUUsage() {
     string result = "CPU usada: 0.00 %\n";
 
     FILE* file = popen(command, "r");
+    if (file) {
+        if(fgets(buffer,sizeof(buffer), file) != nullptr) {
+            string line = buffer;
+            size_t position = line.find("id,");
 
-    if(fgets(buffer,sizeof(buffer), file) != nullptr) {
-        string line = buffer;
-        size_t position = line.find("id,");
+            //lógica para achar o "id" no meio do output do comando
+            if(position != string::npos) {
+                size_t start_position = line.rfind(',', position);
 
-        //lógica para achar o "id" no meio do output do comando
-        if(position != string::npos) {
-            size_t start_position = line.rfind(',', position);
+                if(start_position != string::npos) {
+                    string idle_usage = line.substr(start_position + 1, position - (start_position + 1));
+                    
+                    //Evita que o separador decimal seja uma vírgula, para que o stod funcione corretamente
+                    replace(idle_usage.begin(), idle_usage.end(), ',', '.');
 
-            if(start_position != string::npos) {
-                string idle_usage = line.substr(start_position + 1, position - (start_position + 1));
-                
-                //Evita que o separador decimal seja uma vírgula, para que o stod funcione corretamente
-                replace(idle_usage.begin(), idle_usage.end(), ',', '.');
+                    //Cálculo para a porcentagem de uso da CPU
+                    double idle_percentage = stod(idle_usage);
+                    double cpu_percentage = 100.0 - idle_percentage;
 
-                //Cálculo para a porcentagem de uso da CPU
-                double idle_percentage = stod(idle_usage);
-                double cpu_percentage = 100.0 - idle_percentage;
-
-                stringstream ss;
-                ss << fixed << setprecision(2) << "CPU Usada: " << cpu_percentage << " %\n";
-                result = ss.str();
+                    stringstream ss;
+                    ss << fixed << setprecision(2) << "CPU Usada: " << cpu_percentage << " %\n";
+                    result = ss.str();
+                }
             }
         }
+        pclose(file);
+    } else {
+        cerr << "Erro ao executar comando para obter uso de CPU.\n";
     }
-    pclose(file);
     return result;
 }
 
@@ -104,19 +107,21 @@ string getMemoryUsage() {
             result = result_ss.str();
         }
         pclose(file);
+    } else {
+        cerr << "Erro ao executar comando para obter uso de memória.\n";
     }
     return result;
 }
 
 
-void output(int clientSocket, pid_t pid, int tempo, int tipo, monitorControl& control) {
+void output(int clientSocket, int tempo, int tipo, monitorControl& control) {
     while (control.keepRunning) {
         string result = (tipo == 1) ? getMemoryUsage() : getCPUUsage();
         send(clientSocket, result.c_str(), result.size(), 0);
 
-        std::unique_lock<std::mutex> lock(control.mtx);
+        unique_lock<mutex> lock(control.mtx);
 
-        if (control.cv.wait_for(lock, std::chrono::seconds(tempo), [&](){ 
+        if (control.cv.wait_for(lock, chrono::seconds(tempo), [&](){ 
             return !control.keepRunning;
         })) 
         {
@@ -125,7 +130,7 @@ void output(int clientSocket, pid_t pid, int tempo, int tipo, monitorControl& co
     }
 }
 
-void input(int clientSocket, pid_t pid, atomic<int>& client_count) {
+void input(int clientSocket, atomic<int>& client_count) {
     //Aumenta contador de clientes conectados
     client_count++;
     cout << "Quantidade de clientes conectados: " << client_count << endl;
@@ -171,7 +176,7 @@ void input(int clientSocket, pid_t pid, atomic<int>& client_count) {
 
             } else {
                 memControl.keepRunning = true;
-                threadMem = thread(output, clientSocket, pid, tempo, 1, ref(memControl));
+                threadMem = thread(output, clientSocket, tempo, 1, ref(memControl));
             }
 
         } else if (cmd == "CPU") {
@@ -196,7 +201,7 @@ void input(int clientSocket, pid_t pid, atomic<int>& client_count) {
                 if (threadCpu.joinable()) {
                     threadCpu.join();
                 }
-                threadCpu = thread(output, clientSocket, pid, tempo, 0, ref(cpuControl));
+                threadCpu = thread(output, clientSocket, tempo, 0, ref(cpuControl));
             }
 
         } else if (cmd == "QUIT") {
@@ -243,13 +248,13 @@ void input(int clientSocket, pid_t pid, atomic<int>& client_count) {
                     threadCpu.join();
                 }
 
-                std::string msg = "Todos os monitores foram interrompidos.\n";
+                string msg = "Todos os monitores foram interrompidos.\n";
                 send(clientSocket, msg.c_str(), msg.size(), 0);
 
                 sendMenu(clientSocket);
 
             } else {
-                send(clientSocket, "Use: Quit MEM ou Quit CPU\n", 27, 0);
+                send(clientSocket, "Use: Quit <CPU | MEM | ALL>\n", 27, 0);
             }
 
         } else if (cmd == "EXIT") {
@@ -304,7 +309,7 @@ int main(int argc, char *argv[]) {
     atomic<int> client_count{0};
 
     //Cria lista de threads e socket dos clientes
-    vector<pair<thread, int>> clientThreads;
+    vector<pair<thread, int>> clients;
 
     int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -316,20 +321,18 @@ int main(int argc, char *argv[]) {
     bind(serverSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress));
     listen(serverSocket, 5);
 
-    pid_t pid = getpid();
-
     cout << "Servidor aguardando conexão...\n";
 
-    std::atomic<bool> running{true};
+    atomic<bool> running{true};
 
     // Thread para ler input do terminal do servidor
-    std::thread serverInput([&running]() {
-        std::string cmd;
+    thread serverInput([&running]() {
+        string cmd;
         while (running) {
-            std::getline(std::cin, cmd);
+            getline(cin, cmd);
             if (cmd == "exit") {
                 running = false;
-                std::cout << "Encerrando servidor...\n";
+                cout << "Encerrando servidor...\n";
                 break;
             }
         }
@@ -364,11 +367,11 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
-            auto now = std::chrono::system_clock::now();
-            auto in_time_t = std::chrono::system_clock::to_time_t(now);
+            auto now = chrono::system_clock::now();
+            auto in_time_t = chrono::system_clock::to_time_t(now);
 
             stringstream ss;
-            ss << "<" << std::put_time(std::localtime(&in_time_t), "%H:%M:%S") << ">: CONECTADO!!\n";
+            ss << "<" << put_time(localtime(&in_time_t), "%H:%M:%S") << ">: CONECTADO!!\n";
             string connectedMsg = ss.str();
             send(clientSocket, connectedMsg.c_str(), connectedMsg.size(), 0);
 
@@ -377,7 +380,7 @@ int main(int argc, char *argv[]) {
             cout << "Cliente " << clientSocket << " conectado!! " << endl;
 
             //Guarda thread e socket do cliente na lista
-            clientThreads.emplace_back(thread(input, clientSocket, pid, ref(client_count)), clientSocket);
+            clients.emplace_back(thread(input, clientSocket, ref(client_count)), clientSocket);
         }
         // Se não teve atividade, apenas continua o loop para checar running
     }
@@ -385,13 +388,13 @@ int main(int argc, char *argv[]) {
     cout << "Encerrando conexão com " << client_count << " clientes...\n";
 
     //Fecha todos os sockets
-    for(auto const& [thr, sock] : clientThreads) {
+    for(auto const& [thr, sock] : clients) {
         shutdown(sock, SHUT_RDWR);
         close(sock);
     }
 
     //Da join em todas as threads
-    for(auto& [thr, sock] : clientThreads) {
+    for(auto& [thr, sock] : clients) {
         if(thr.joinable()) {
             thr.join();
         }
